@@ -16,6 +16,8 @@ char pathname[18];
 int out_ep;
 int in_ep;
 
+#define SAME_TIMEOUT_DEFAULT 60000;
+
 typedef struct MESSAGE_S {
 		int length;
 		unsigned char signature[20];
@@ -46,7 +48,7 @@ void usage(int error)
 }
 
 libusb_device_handle * LIBUSB_CALL open_device_with_vid(
-	libusb_context *ctx, uint16_t vendor_id)
+	libusb_context *ctx, uint16_t vendor_id, uint8_t same_bus, uint8_t same_port)
 {
 	struct libusb_device **devs;
 	struct libusb_device *found = NULL;
@@ -85,8 +87,11 @@ libusb_device_handle * LIBUSB_CALL open_device_with_vid(
 			printf("Found device %u idVendor=0x%04x idProduct=0x%04x\n", i, desc.idVendor, desc.idProduct);
 			printf("Bus: %d, Device: %d Path: %s\n",libusb_get_bus_number(dev), libusb_get_device_address(dev), pathname);
 		}
-		
-		if (desc.idVendor == vendor_id) {
+		if ((desc.idVendor == vendor_id) &&
+			((same_bus <= 0) ||
+			((libusb_get_bus_number(dev) == same_bus) &&
+			  libusb_get_port_number(dev) == same_port)))
+		{
 			if(desc.idProduct == 0x2763 ||
 			   desc.idProduct == 0x2764)
 			{
@@ -113,13 +118,13 @@ out:
 
 }
 
-int Initialize_Device(libusb_context ** ctx, libusb_device_handle ** usb_device)
+int Initialize_Device(libusb_context ** ctx, libusb_device_handle ** usb_device, uint8_t same_bus, uint8_t same_port)
 {
 	int ret = 0;
 	int interface;
 	struct libusb_config_descriptor *config;
 
-	*usb_device = open_device_with_vid(*ctx, 0x0a5c);
+	*usb_device = open_device_with_vid(*ctx, 0x0a5c, same_bus, same_port);
 	if (*usb_device == NULL)
 	{
 		usleep(200);
@@ -492,6 +497,9 @@ int main(int argc, char *argv[])
 	libusb_device_handle *usb_device;
 	struct libusb_device_descriptor desc;
 	struct libusb_config_descriptor *config;
+	uint8_t same_bus = 0;
+	uint8_t	same_port;
+	int same_timeout = 0;
 
 	get_options(argc, argv);
 
@@ -555,7 +563,22 @@ int main(int argc, char *argv[])
 		// Wait for a device to get plugged in
 		do
 		{
-			ret = Initialize_Device(&ctx, &usb_device);
+			// Timeout check for same bus/port filter
+			if(same_bus != 0)
+			{
+				if (same_timeout <= 0)
+				{
+					// timeout exceeded, clear the same bus/port filter
+					same_bus = 0;
+					same_port = 0;
+					if(verbose) printf("Bus/port timeout exceeded, clearing bus check flag\n");
+				}
+				else
+				{
+					same_timeout--;
+				}
+			}
+			ret = Initialize_Device(&ctx, &usb_device, same_bus, same_port);
 			if(ret == 0)
 			{
 				libusb_get_device_descriptor(libusb_get_device(usb_device), &desc);
@@ -584,13 +607,26 @@ int main(int argc, char *argv[])
 		if(desc.iSerialNumber == 0)
 		{
 			printf("Sending bootcode.bin\n");
-			second_stage_boot(usb_device);
+			same_bus = libusb_get_bus_number(libusb_get_device(usb_device));
+			same_port = libusb_get_port_number(libusb_get_device(usb_device));
+			same_timeout = SAME_TIMEOUT_DEFAULT;
+			if(verbose) printf(" set same_bus= %d same_port= %d same timeout %d\n", same_bus, same_port, same_timeout);
+			if (second_stage_boot(usb_device))
+			{
+				// Failed, stop checking for the same bus/port
+				same_bus=0;
+				same_port=0;
+			}
 		}
-		else
+		else if(same_bus)
 		{
 			printf("Second stage boot server\n");
 			file_server(usb_device);
+			// Done with an upload, stop checking for the same bus/port
+			same_bus=0;
+			same_port=0;
 		}
+
 
 		libusb_close(usb_device);
 		sleep(1);
