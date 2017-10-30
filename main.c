@@ -47,8 +47,8 @@ void usage(int error)
 	exit(error ? -1 : 0);
 }
 
-libusb_device_handle * LIBUSB_CALL open_device_with_vid(
-	libusb_context *ctx, uint16_t vendor_id, uint8_t same_bus, uint8_t same_port)
+libusb_device_handle * LIBUSB_CALL open_device_with_vid_bus_port(
+	libusb_context *ctx, uint16_t vendor_id, uint8_t bus, uint8_t port)
 {
 	struct libusb_device **devs;
 	struct libusb_device *found = NULL;
@@ -87,10 +87,11 @@ libusb_device_handle * LIBUSB_CALL open_device_with_vid(
 			printf("Found device %u idVendor=0x%04x idProduct=0x%04x\n", i, desc.idVendor, desc.idProduct);
 			printf("Bus: %d, Device: %d Path: %s\n",libusb_get_bus_number(dev), libusb_get_device_address(dev), pathname);
 		}
+		// require bus/port match only if bus is !=0
 		if ((desc.idVendor == vendor_id) &&
-			((same_bus <= 0) ||
-			((libusb_get_bus_number(dev) == same_bus) &&
-			  libusb_get_port_number(dev) == same_port)))
+			((bus <= 0) ||
+			((libusb_get_bus_number(dev) == bus) &&
+			  libusb_get_port_number(dev) == port)))
 		{
 			if(desc.idProduct == 0x2763 ||
 			   desc.idProduct == 0x2764)
@@ -118,13 +119,42 @@ out:
 
 }
 
-int Initialize_Device(libusb_context ** ctx, libusb_device_handle ** usb_device, uint8_t same_bus, uint8_t same_port)
+#define USB_PORT_FEAT_POWER      (1 << 3)
+int cycle_hub_port(libusb_device_handle * usb_device_handle)
+{
+	int ret,portno;
+	libusb_device_handle *hub;
+	libusb_device *dev,*hubdev;
+	dev=libusb_get_device(usb_device_handle);
+	portno=libusb_get_port_number(dev);
+	hubdev=libusb_get_parent(dev);
+	ret=libusb_open(hubdev,&hub);
+	printf("CYCLE (%d): open hub (%d)\n",portno,ret);
+	printf("Bus: %d, Device: %d\n",libusb_get_bus_number(hubdev), libusb_get_device_address(hubdev));
+	ret = libusb_control_transfer(hub,
+	LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_OTHER,
+	LIBUSB_REQUEST_CLEAR_FEATURE, USB_PORT_FEAT_POWER, portno, NULL, 0, 10000
+	);
+	printf("CYCLE (%d): power off port (%d)\n",portno,ret);
+	sleep(6);
+	ret = libusb_control_transfer(hub,
+	LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_OTHER,
+	LIBUSB_REQUEST_SET_FEATURE, USB_PORT_FEAT_POWER, portno, NULL, 0, 10000 
+	);
+	printf("CYCLE (%d): power on port (%d)\n",portno,ret);
+
+
+	libusb_close(hub);
+	return 0;
+}
+
+int Initialize_Device(libusb_context ** ctx, libusb_device_handle ** usb_device, uint8_t bus, uint8_t port)
 {
 	int ret = 0;
 	int interface;
 	struct libusb_config_descriptor *config;
 
-	*usb_device = open_device_with_vid(*ctx, 0x0a5c, same_bus, same_port);
+	*usb_device = open_device_with_vid_bus_port(*ctx, 0x0a5c, bus, port);
 	if (*usb_device == NULL)
 	{
 		usleep(200);
@@ -171,11 +201,12 @@ int ep_write(void *buf, int len, libusb_device_handle * usb_device)
 	int a_len = 0;
 	int ret =
 	    libusb_control_transfer(usb_device, LIBUSB_REQUEST_TYPE_VENDOR, 0,
-				    len & 0xffff, len >> 16, NULL, 0, 1000);
+				    len & 0xffff, len >> 16, NULL, 0, 10000);
 
 	if(ret != 0)
 	{
 		printf("Failed control transfer (%d,%d)\n", ret, len);
+		cycle_hub_port(usb_device);
 		return ret;
 	}
 
